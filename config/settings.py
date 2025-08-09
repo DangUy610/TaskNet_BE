@@ -168,5 +168,6 @@ CHANNEL_LAYERS = {
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
 # Đường dẫn thư mục tuyệt đối trên server để lưu các file được tải lên
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
