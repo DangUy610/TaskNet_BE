@@ -31,7 +31,7 @@ ALLOWED_HOSTS = [
     "localhost",
 ]
 CORS_ALLOWED_ORIGINS = [
-    "https://task-net-fe.vercel.app/",  # domain FE Railway
+    "https://task-net-fe.vercel.app",  # domain FE Railway
     "https://task-net-fe.vercel.app:3000",  # FE Railway with port
     "https://task-net-fe.vercel.app:3001",  # FE Railway with port
     "https://task-net-fe.vercel.app:3002",  # FE Railway with port
@@ -175,7 +175,6 @@ CHANNEL_LAYERS = {
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / "staticfiles"
 # Đường dẫn thư mục tuyệt đối trên server để lưu các file được tải lên
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
