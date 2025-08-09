@@ -86,68 +86,49 @@ class GoogleLoginView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        input_serializer = GoogleLoginSerializer(data=request.data)
-        input_serializer.is_valid(raise_exception=True)
-        token = input_serializer.validated_data['token']
+        ser = GoogleLoginSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        token = ser.validated_data['token']
 
         try:
-            # 1. Xác minh với Google
-            verify_url = f"https://www.googleapis.com/oauth2/v3/tokeninfo?id_token={token}"
-            google_res = requests.get(verify_url)
-            google_res.raise_for_status() # Tự động báo lỗi nếu status code không phải 2xx
+            idinfo = google_id_token.verify_oauth2_token(token, grequests.Request())
+            email = idinfo.get('email')
+            name = idinfo.get('name') or ''
+            picture = idinfo.get('picture')
 
-            data = google_res.json()
-            email = data.get('email')
-
-            # (1) Kiểm tra email ngay từ đầu
             if not email:
-                return Response({'error': 'No email in token'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': 'No email in token'}, status=400)
 
-            # (2) Lấy hoặc tạo user DỰA TRÊN EMAIL và xóa bỏ logic thừa
-            try:
-                user = User.objects.get(email=email)
-                created = False # User đã tồn tại
-            except User.DoesNotExist:
-                # Dùng email làm username mặc định
-                user = User.objects.create_user(username=email, email=email)
-                created = True # User vừa được tạo
+            user, created = User.objects.get_or_create(
+                email=email,
+                defaults={'username': email, 'first_name': name}
+            )
 
-            # Signal 'post_save' sẽ tự động tạo Profile và Workspace nếu user được tạo mới
-            profile = user.profile
+            # login(request, user)  # chỉ cần nếu dùng session/cookie
 
-            login(request, user)
-            tokens = get_tokens_for_user(user)
-
-            # (3) Xử lý avatar một cách thông minh hơn
-            # Chỉ tải avatar nếu là user mới hoặc user chưa có avatar
-            picture = data.get('picture')
+            # avatar: chỉ tải khi mới tạo hoặc chưa có
+            profile = user.profile  # theo code hiện có
             if picture and (created or not profile.avatar):
                 try:
-                    resp_img = requests.get(picture, timeout=5)
-                    resp_img.raise_for_status()
-                    fname = f'user_{user.id}.jpg'
-                    profile.avatar.save(fname, ContentFile(resp_img.content), save=True)
+                    img = requests.get(picture, timeout=5)
+                    img.raise_for_status()
+                    profile.avatar.save(f'user_{user.id}.jpg', ContentFile(img.content), save=True)
                 except Exception as e:
-                    print(f"Failed to fetch Google avatar for {email}: {e}")
+                    print('Avatar fetch failed:', e)
 
-            user_data = UserSerializer(user, context={'request': request}).data
-            
-            # (4) Trả về response gọn gàng
+            tokens = get_tokens_for_user(user)
             return Response({
                 'ok': True,
-                'user': user_data,
+                'user': UserSerializer(user, context={'request': request}).data,
                 'token': tokens['access'],
                 'refresh': tokens['refresh'],
             })
 
-        except requests.exceptions.HTTPError as e:
-            print('[GoogleLogin] HTTP Error:', str(e))
-            return Response({'error': 'Invalid or expired Google token.'}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError:
+            return Response({'error': 'Invalid or expired Google token.'}, status=400)
         except Exception as e:
-            print('[GoogleLogin] General Exception:', str(e))
-            traceback.print_exc()
-            return Response({'error': 'An internal server error occurred.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+            print('[GoogleLogin] Exception:', e)
+            return Response({'error': 'Internal server error'}, status=500)
 class UserSearchView(APIView):
     permission_classes = [IsAuthenticated]
 

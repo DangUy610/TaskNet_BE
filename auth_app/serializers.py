@@ -133,11 +133,16 @@ class LoginSerializer(serializers.Serializer):
 
 
 # ----------------- 4. Serializer cho chức năng ĐĂNG NHẬP GOOGLE -----------------
+
 class GoogleLoginSerializer(serializers.Serializer):
-    """
-    Serializer để validate token từ Google.
-    """
-    token = serializers.CharField(write_only=True, required=True)
+    token = serializers.CharField(required=False, allow_blank=False)
+    id_token = serializers.CharField(required=False, allow_blank=False)
+
+    def validate(self, attrs):
+        tok = attrs.get('token') or attrs.get('id_token')
+        if not tok:
+            raise serializers.ValidationError("Missing Google ID token")
+        return {'token': tok}
 
 # ----------------- 5. Serializer cho chức năng INVITE -----------------
 
