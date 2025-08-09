@@ -179,3 +179,7 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / "staticfiles"
 # Đường dẫn thư mục tuyệt đối trên server để lưu các file được tải lên
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+# Nếu endpoint đăng nhập dùng Session/CSRF (không chỉ JWT), cần thêm:
+CSRF_TRUSTED_ORIGINS = [
+    "https://task-net-fe.vercel.app",
+]
