@@ -26,7 +26,10 @@ SECRET_KEY = 'django-insecure-ylp2b_80cd=8zgryq7n#cpcz&dn+u2g8s-hoe-r$=r9&jxgi&@
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    "tasknetbe-production.up.railway.app",  # domain BE Railway
+    "localhost",
+]
 CORS_ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:3001",
