@@ -49,7 +49,6 @@ INSTALLED_APPS = [
     'rest_framework',
     'auth_app.apps.AuthAppConfig',
     'boards',
-    'channels',
     'rest_framework_simplejwt.token_blacklist',
     
     
