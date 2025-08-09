@@ -10,6 +10,8 @@ from boards.models import Workspace
 from django.core.files.base import ContentFile
 import traceback
 from django.db.models import Q
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as grequests
 
 from .serializers import (
     RegisterSerializer,
