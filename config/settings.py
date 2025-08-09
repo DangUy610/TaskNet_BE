@@ -31,6 +31,11 @@ ALLOWED_HOSTS = [
     "localhost",
 ]
 CORS_ALLOWED_ORIGINS = [
+    "http://tasknetfe-production.up.railway.app",  # domain FE Railway
+    "http://tasknetfe-production.up.railway.app:3000",  # FE Railway with port
+    "http://tasknetfe-production.up.railway.app:3001",  # FE Railway with port
+    "http://tasknetfe-production.up.railway.app:3002",  #   FE Railway with port
+    "http://tasknetfe-production.up.railway.app:3003",  #   FE Railway with port
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
