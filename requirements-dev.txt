@@ -1,0 +1,18 @@
+-r requirements.txt
+numpy
+scipy
+scikit-image
+imageio
+tifffile
+opencv-python
+opencv-contrib-python
+PyAutoGUI
+PyScreeze
+PyGetWindow
+PyMsgBox
+MouseInfo
+pyperclip
+PyRect
+pynput
+keyboard
+selenium
