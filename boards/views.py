@@ -6,13 +6,13 @@ from rest_framework import status
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 
-from .models import Board, Workspace, List, Card, Label, BoardMembership, BoardInviteLink
+from .models import Board, List, Card, Label, BoardMembership, BoardInviteLink,Comment
 from .serializers import (
-    BoardSerializer, WorkspaceSerializer, ListSerializer, CardSerializer, LabelSerializer,
-    UserShortSerializer, BoardMembershipSerializer, BoardInviteLinkSerializer
+    BoardSerializer, ListSerializer, CardSerializer, LabelSerializer,
+    UserShortSerializer, BoardMembershipSerializer, BoardInviteLinkSerializer,CommentSerializer
 )
 from .decorators import require_board_admin, require_board_editor, require_card_editor, require_board_viewer
-from .permissions import check_board_admin_permission # Import hàm permission mới
+from .permissions import check_board_admin_permission,check_card_edit_permission, check_board_view_permission # Import hàm permission mới
 
 User = get_user_model()
 
@@ -21,43 +21,26 @@ User = get_user_model()
 # Views cho Workspace và Board chính
 # ===================================================================
 
-class WorkspaceListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        workspaces = Workspace.objects.filter(Q(owner=request.user) | Q(board__members=request.user)).distinct()
-        serializer = WorkspaceSerializer(workspaces, many=True)
-        return Response(serializer.data)
-
-    def post(self, request):
-        serializer = WorkspaceSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save(owner=request.user)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class BoardListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, workspace_id):
+    def get(self, request):
         boards = Board.objects.filter(
-            workspace_id=workspace_id, is_closed=False
+           is_closed=False
         ).filter(
             Q(created_by=request.user) | Q(members=request.user)
         ).distinct()
         serializer = BoardSerializer(boards, many=True, context={'request': request})
         return Response(serializer.data)
 
-    def post(self, request, workspace_id):
-        try:
-            workspace = Workspace.objects.get(id=workspace_id, owner=request.user)
-        except Workspace.DoesNotExist:
-            return Response({'error': 'You do not have permission to create a board in this workspace.'}, status=status.HTTP_403_FORBIDDEN)
+    def post(self, request,):
 
         serializer = BoardSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
-        board = serializer.save(workspace=workspace, created_by=request.user)
-        
+        board = serializer.save(created_by=request.user)
         DEFAULT_LABEL_COLORS = ['#61bd4f', '#f2d600', '#ff9f1a', '#eb5a46', '#c377e0', '#0079bf']
         for color in DEFAULT_LABEL_COLORS:
             Label.objects.create(name='', color=color, board=board)
@@ -68,22 +51,22 @@ class BoardDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     @require_board_viewer(lambda s, r, **k: Board.objects.get(id=k['board_id']))
-    def get(self, request, workspace_id, board_id):
-        board = Board.objects.get(id=board_id, workspace_id=workspace_id)
+    def get(self, request, board_id):
+        board = Board.objects.get(id=board_id)
         serializer = BoardSerializer(board, context={'request': request})
         return Response(serializer.data)
 
     @require_board_admin(lambda s, r, **k: Board.objects.get(id=k['board_id']))
-    def patch(self, request, workspace_id, board_id):
-        board = Board.objects.get(id=board_id, workspace_id=workspace_id)
+    def patch(self, request, board_id):
+        board = Board.objects.get(id=board_id)
         if 'is_closed' in request.data:
             board.is_closed = request.data['is_closed']
             board.save(update_fields=['is_closed'])
         serializer = BoardSerializer(board, context={'request': request})
         return Response(serializer.data)
         
-    def delete(self, request, workspace_id, board_id):
-        board = Board.objects.get(id=board_id, workspace_id=workspace_id)
+    def delete(self, request, board_id):
+        board = Board.objects.get(id=board_id)
         if board.created_by != request.user:
             return Response({'error': 'Only the board creator can permanently delete the board.'}, status=status.HTTP_403_FORBIDDEN)
         board.delete()
@@ -95,7 +78,7 @@ class ClosedBoardsListView(APIView):
         user_boards = Board.objects.filter(
             Q(created_by=request.user) | Q(members=request.user),
             is_closed=True
-        ).distinct().prefetch_related('workspace')
+        )
         serializer = BoardSerializer(user_boards, many=True, context={'request': request})
         return Response(serializer.data)
     
@@ -152,11 +135,13 @@ class CardListCreateView(APIView):
 
 class CardDetailView(APIView):
     permission_classes = [IsAuthenticated]
+
     @require_card_editor(lambda s, r, **k: Card.objects.get(id=k['card_id']))
     def patch(self, request, card_id):
         card = Card.objects.get(id=card_id)
         serializer = CardSerializer(card, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
+        
         serializer.save()
         return Response(serializer.data)
     
@@ -414,9 +399,19 @@ class BoardShareLinkView(APIView):
         # lấy link đang hoạt động (nếu có)
         invite = BoardInviteLink.objects.filter(board_id=board_id, is_active=True).first()
         if not invite:
-            return Response({'detail': 'No active invite link'}, status=404)
+            return Response({
+                "has_active": False,
+                "invite_link": None,
+                "expires_at": None
+            }, status=status.HTTP_200_OK)
+
         serializer = BoardInviteLinkSerializer(invite)
-        return Response(serializer.data)
+        return Response({
+            "has_active": True,
+            "invite_link": serializer.data.get("url"),      # hoặc field token/url tuỳ model
+            "expires_at": serializer.data.get("expires_at")
+        })
+        
 
     @require_board_admin(lambda self, request, board_id: Board.objects.get(id=board_id))
     def post(self, request, board_id):
@@ -453,3 +448,62 @@ class BoardJoinByLinkView(APIView):
         membership_role = 'editor' if invite.role == 'member' else 'viewer'
         BoardMembership.objects.create(board=board, user=user, role=membership_role)
         return Response({'detail': 'Joined board successfully'})
+
+
+class CardCommentsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, card_id):
+        card = Card.objects.select_related('list__board', 'created_by').get(id=card_id)
+        # Quyền xem: nếu có list => dùng quyền xem board; nếu inbox => tác giả hoặc cùng board
+        if card.list:
+            check_board_view_permission(card.list.board, request.user)
+        else:
+            if card.created_by != request.user:
+                # người dùng phải có ít nhất 1 board chung với tác giả
+                from django.db.models import Q
+                has_common = Board.objects.filter(
+                    Q(created_by=request.user) | Q(members=request.user)
+                ).filter(
+                    Q(created_by=card.created_by) | Q(members=card.created_by)
+                ).exists()
+                if not has_common:
+                    return Response({'detail': 'Forbidden'}, status=403)
+
+        qs = Comment.objects.filter(card=card).order_by('-created_at')
+        return Response(CommentSerializer(qs, many=True).data)
+
+    def post(self, request, card_id):
+        card = Card.objects.select_related('list__board').get(id=card_id)
+        # Quyền tạo: dùng quyền sửa card (editor trở lên hoặc quy tắc inbox)
+        check_card_edit_permission(card, request.user)
+
+        ser = CommentSerializer(data={'content': request.data.get('content', ''), 'card': card.id})
+        ser.is_valid(raise_exception=True)
+        comment = Comment.objects.create(
+            card=card,
+            author=request.user,
+            content=ser.validated_data['content']
+        )
+        return Response(CommentSerializer(comment).data, status=201)
+
+class CommentDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, comment_id):
+        cmt = Comment.objects.select_related('card__list__board').get(id=comment_id)
+        # Cho sửa nếu là tác giả; hoặc có quyền editor trên board của card
+        if cmt.author != request.user:
+            check_card_edit_permission(cmt.card, request.user)
+
+        ser = CommentSerializer(cmt, data={'content': request.data.get('content', '')}, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data)
+
+    def delete(self, request, comment_id):
+        cmt = Comment.objects.select_related('card__list__board').get(id=comment_id)
+        if cmt.author != request.user:
+            check_card_edit_permission(cmt.card, request.user)
+        cmt.delete()
+        return Response(status=204)

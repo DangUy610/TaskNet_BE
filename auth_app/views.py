@@ -6,12 +6,9 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.tokens import RefreshToken
 import requests
-from boards.models import Workspace
 from django.core.files.base import ContentFile
 import traceback
 from django.db.models import Q
-from google.oauth2 import id_token as google_id_token
-from google.auth.transport import requests as grequests
 
 from .serializers import (
     RegisterSerializer,
@@ -56,9 +53,6 @@ class LoginView(APIView):
         login(request, user) # Cần cho Django Admin và các tính năng session-based khác
         tokens = get_tokens_for_user(user)
 
-        # Logic kiểm tra workspace cho user cũ có thể vẫn giữ lại nếu cần
-        if not Workspace.objects.filter(owner=user).exists():
-            Workspace.objects.create(name="Hard Spirit", owner=user)
 
         return Response({
             "ok": True,
@@ -88,49 +82,68 @@ class GoogleLoginView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        ser = GoogleLoginSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        token = ser.validated_data['token']
+        input_serializer = GoogleLoginSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        token = input_serializer.validated_data['token']
 
         try:
-            idinfo = google_id_token.verify_oauth2_token(token, grequests.Request())
-            email = idinfo.get('email')
-            name = idinfo.get('name') or ''
-            picture = idinfo.get('picture')
+            # 1. Xác minh với Google
+            verify_url = f"https://www.googleapis.com/oauth2/v3/tokeninfo?id_token={token}"
+            google_res = requests.get(verify_url)
+            google_res.raise_for_status() # Tự động báo lỗi nếu status code không phải 2xx
 
+            data = google_res.json()
+            email = data.get('email')
+
+            # (1) Kiểm tra email ngay từ đầu
             if not email:
-                return Response({'error': 'No email in token'}, status=400)
+                return Response({'error': 'No email in token'}, status=status.HTTP_400_BAD_REQUEST)
 
-            user, created = User.objects.get_or_create(
-                email=email,
-                defaults={'username': email, 'first_name': name}
-            )
+            # (2) Lấy hoặc tạo user DỰA TRÊN EMAIL và xóa bỏ logic thừa
+            try:
+                user = User.objects.get(email=email)
+                created = False # User đã tồn tại
+            except User.DoesNotExist:
+                # Dùng email làm username mặc định
+                user = User.objects.create_user(username=email, email=email)
+                created = True # User vừa được tạo
 
-            # login(request, user)  # chỉ cần nếu dùng session/cookie
+            # Signal 'post_save' sẽ tự động tạo Profile và Workspace nếu user được tạo mới
+            profile = user.profile
 
-            # avatar: chỉ tải khi mới tạo hoặc chưa có
-            profile = user.profile  # theo code hiện có
+            login(request, user)
+            tokens = get_tokens_for_user(user)
+
+            # (3) Xử lý avatar một cách thông minh hơn
+            # Chỉ tải avatar nếu là user mới hoặc user chưa có avatar
+            picture = data.get('picture')
             if picture and (created or not profile.avatar):
                 try:
-                    img = requests.get(picture, timeout=5)
-                    img.raise_for_status()
-                    profile.avatar.save(f'user_{user.id}.jpg', ContentFile(img.content), save=True)
+                    resp_img = requests.get(picture, timeout=5)
+                    resp_img.raise_for_status()
+                    fname = f'user_{user.id}.jpg'
+                    profile.avatar.save(fname, ContentFile(resp_img.content), save=True)
                 except Exception as e:
-                    print('Avatar fetch failed:', e)
+                    print(f"Failed to fetch Google avatar for {email}: {e}")
 
-            tokens = get_tokens_for_user(user)
+            user_data = UserSerializer(user, context={'request': request}).data
+            
+            # (4) Trả về response gọn gàng
             return Response({
                 'ok': True,
-                'user': UserSerializer(user, context={'request': request}).data,
+                'user': user_data,
                 'token': tokens['access'],
                 'refresh': tokens['refresh'],
             })
 
-        except ValueError:
-            return Response({'error': 'Invalid or expired Google token.'}, status=400)
+        except requests.exceptions.HTTPError as e:
+            print('[GoogleLogin] HTTP Error:', str(e))
+            return Response({'error': 'Invalid or expired Google token.'}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            print('[GoogleLogin] Exception:', e)
-            return Response({'error': 'Internal server error'}, status=500)
+            print('[GoogleLogin] General Exception:', str(e))
+            traceback.print_exc()
+            return Response({'error': 'An internal server error occurred.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
 class UserSearchView(APIView):
     permission_classes = [IsAuthenticated]
 
