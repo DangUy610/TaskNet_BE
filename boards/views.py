@@ -37,15 +37,13 @@ class BoardListCreateView(APIView):
         return Response(serializer.data)
 
     def post(self, request,):
-
         serializer = BoardSerializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        board = serializer.save(created_by=request.user)
-        DEFAULT_LABEL_COLORS = ['#61bd4f', '#f2d600', '#ff9f1a', '#eb5a46', '#c377e0', '#0079bf']
-        for color in DEFAULT_LABEL_COLORS:
-            Label.objects.create(name='', color=color, board=board)
-
-        return Response(BoardSerializer(board, context={'request': request}).data, status=status.HTTP_201_CREATED)
+        if serializer.is_valid(raise_exception=True):
+            board = serializer.save(created_by=request.user)
+            DEFAULT_LABEL_COLORS = ['#61bd4f', '#f2d600', '#ff9f1a', '#eb5a46', '#c377e0', '#0079bf']
+            for color in DEFAULT_LABEL_COLORS:
+                Label.objects.create(name='', color=color, board=board)
+            return Response(BoardSerializer(board, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 class BoardDetailView(APIView):
     permission_classes = [IsAuthenticated]
