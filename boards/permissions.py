@@ -1,73 +1,326 @@
 # backends/boards/permissions.py
-from rest_framework.exceptions import PermissionDenied
 from django.db.models import Q
-from .models import Board, BoardMembership
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import BasePermission
+from .models import (
+    Board, BoardMembership,
+    Workspace, WorkspaceMembership,WorkspaceRole,BoardRole,
+    BoardVisibility,
+)
 
-def get_user_role_on_board(board, user):
+# ============
+# Helpers
+# ============
+
+def _is_auth(user) -> bool:
+    return bool(user and getattr(user, "is_authenticated", False))
+
+def _is_workspace_owner(user, workspace: Workspace) -> bool:
+    return _is_auth(user) and workspace and workspace.owner_id == user.id
+
+def _workspace_role(user, workspace: Workspace):
     """
-    Trả về vai trò của người dùng trên board: 'owner', 'admin', 'editor', 'viewer', hoặc None.
+    Trả về 'admin' | 'member' | None
     """
-    if not user.is_authenticated:
+    if not (_is_auth(user) and workspace):
         return None
-    if board.created_by == user:
+    return WorkspaceMembership.objects.filter(
+        user=user, workspace=workspace
+    ).values_list("role", flat=True).first()
+
+def _board_role(user, board: Board):
+    """
+    Trả về 'admin' | 'editor' | 'viewer' | None
+    """
+    if not (_is_auth(user) and board):
+        return None
+    return BoardMembership.objects.filter(
+        user=user, board=board
+    ).values_list("role", flat=True).first()
+
+def get_user_role_on_board(board: Board, user):
+    """
+    Hoàn trả 'owner' nếu user là creator, ngược lại role từ BoardMembership,
+    hoặc None nếu không thuộc board.
+    """
+    if not _is_auth(user):
+        return None
+    if board and board.created_by_id == user.id:
         return 'owner'
-    try:
-        membership = BoardMembership.objects.get(board=board, user=user)
-        return membership.role
-    except BoardMembership.DoesNotExist:
-        return None
+    return _board_role(user, board)
 
-def check_board_view_permission(board, user):
+def get_user_workspace_role(user, workspace):
+    if workspace.owner_id == user.id:
+        return "owner"
+    role = WorkspaceMembership.objects.filter(workspace=workspace, user=user)\
+                                      .values_list("role", flat=True).first()
+    if not role:
+        # guest nếu chỉ là member của board trong workspace
+        from .models import BoardMembership
+        if BoardMembership.objects.filter(board__workspace=workspace, user=user).exists():
+            return "guest"
+        return None
+    return role  # "admin" or "member"
+
+
+# =========================
+# Board-level permissions
+# =========================
+
+def _is_board_owner(user, board: Board) -> bool:
+    owner = board.get_owner()
+    return owner and owner.id == user.id
+
+def can_create_board_in_workspace(user, workspace: Workspace) -> bool:
+    return workspace.can_create_board(user)
+
+def can_transfer_board_ownership(user, board: Board) -> bool:
+    """Chỉ workspace owner hoặc board owner mới được chuyển ownership"""
+    from .models import WorkspaceMembership
+    if not user or not user.is_authenticated:
+        return False
+    if board.get_owner().id == user.id:
+        return True
+    if board.workspace.owner_id == user.id:
+        return True
+    # workspace admin cũng được (tuỳ policy)
+    if WorkspaceMembership.objects.filter(workspace=board.workspace, user=user, role='admin').exists():
+        return True
+    return False
+
+
+def can_view_board(user, board: Board) -> bool:
     """
-    KIỂM TRA QUYỀN XEM (Viewer/Observer trở lên).
-    User có thể xem nếu họ là thành viên (bất kể vai trò) hoặc người tạo.
+    Quyền xem board theo workspace role:
+    - PUBLIC  : ai cũng xem được
+    - OWNER   : xem mọi board của workspace (kể cả private)
+    - ADMIN   : xem mọi board 'workspace'/'public' trong workspace,
+                và mọi board private mà mình là creator hoặc board member
+    - MEMBER  : chỉ xem board mình tạo, board có membership, + mọi board public
+    - GUEST   : như MEMBER (chỉ qua BoardMembership)
     """
-    role = get_user_role_on_board(board, user)
-    if role in ['owner', 'admin', 'editor', 'viewer']:
+    if not board:
+        return False
+
+    vis = board.visibility  # 'public' | 'workspace' | 'private'
+
+    # 1. Board PUBLIC: ai cũng xem (kể cả anonymous)
+    if vis == BoardVisibility.PUBLIC:
+        return True
+
+    # 2. Non-public → phải đăng nhập
+    if not _is_auth(user):
+        return False
+
+    # 3. OWNER workspace: full quyền
+    if _is_workspace_owner(user, board.workspace):
+        return True
+
+    # 4. Creator board luôn xem được
+    if board.created_by_id == user.id:
+        return True
+
+    # 5. Board member (bất kì role nào) luôn xem được
+    role_on_board = _board_role(user, board)
+    if role_on_board:
+        return True
+
+    # 6. Workspace ADMIN: xem được các board 'workspace' trong workspace
+    ws_role = _workspace_role(user, board.workspace)
+    if ws_role == 'admin':  # hoặc WorkspaceRole.ADMIN
+        if vis == BoardVisibility.WORKSPACE:
+            return True
+        # vis = private mà không phải creator/board member → đã bị loại ở trên
+        return False
+
+    # 7. MEMBER / GUEST / None: chỉ được những case đã xử lý phía trên
+    return False
+
+def can_edit_board(user, board: Board) -> bool:
+    """
+    Quyền chỉnh sửa board:
+    - workspace owner: mọi board trong workspace
+    - workspace admin: mọi board trong workspace mà họ có thể xem
+    - board creator
+    - board admin/editor (BoardMembership)
+    """
+    if not (_is_auth(user) and board):
+        return False
+
+    # Nếu không xem được thì chắc chắn không sửa được
+    if not can_view_board(user, board):
+        return False
+
+    # OWNER workspace
+    if _is_workspace_owner(user, board.workspace):
+        return True
+
+    # ADMIN workspace
+    ws_role = _workspace_role(user, board.workspace)
+    if ws_role == 'admin':  # hoặc WorkspaceRole.ADMIN
+        # do đã qua can_view_board nên đảm bảo:
+        # - board non-private trong workspace, hoặc
+        # - board private mà admin là creator/board member
+        return True
+
+    # Creator board
+    if board.created_by_id == user.id:
+        return True
+
+    # Board admin/editor
+    role = _board_role(user, board)
+    if role in ('admin', 'editor'):  # hoặc (BoardRole.ADMIN, BoardRole.EDITOR)
+        return True
+
+    return False
+
+
+def can_delete_board(user, board: Board) -> bool:
+    """
+    Quyền xoá board:
+    - workspace owner
+    - workspace admin (với các board họ nhìn thấy)
+    - board creator
+    - board admin
+    """
+    if not (_is_auth(user) and board):
+        return False
+
+    if not can_view_board(user, board):
+        return False
+
+    if _is_workspace_owner(user, board.workspace):
+        return True
+
+    ws_role = _workspace_role(user, board.workspace)
+    if ws_role == 'admin':
+        return True
+
+    if board.created_by_id == user.id:
+        return True
+
+    role = _board_role(user, board)
+    if role == 'admin':
+        return True
+
+    return False
+
+# ==================================
+# Check-style (raise PermissionDenied)
+# ==================================
+
+def check_board_view_permission(board: Board, user):
+    if not can_view_board(user, board):
+        raise PermissionDenied("You do not have permission to view this board.")
+
+def check_board_edit_permission(board: Board, user):
+    if not _is_auth(user):
+        raise PermissionDenied("Authentication required.")
+    if not can_edit_board(user, board):
+        raise PermissionDenied("You must be an editor, admin, or owner to modify this board.")
+
+def check_board_admin_permission(board: Board, user):
+    if not _is_auth(user):
+        raise PermissionDenied("Authentication required.")
+
+    # Trước hết phải xem được board
+    if not can_view_board(user, board):
+        raise PermissionDenied("You do not have permission to view this board.")
+
+    if not (
+        _is_workspace_owner(user, board.workspace)
+        or _workspace_role(user, board.workspace) == 'admin'
+        or board.created_by_id == user.id
+        or _board_role(user, board) == 'admin'
+    ):
+        raise PermissionDenied("You must be an admin or the board creator to perform this action.")
+
+
+# ==================================
+# Workspace-level permissions
+# ==================================
+
+def check_workspace_view_permission(workspace: Workspace, user):
+    if not _is_auth(user):
+        raise PermissionDenied("Authentication required.")
+    if _is_workspace_owner(user, workspace):
         return
-    raise PermissionDenied("You do not have permission to view this board.")
+    if WorkspaceMembership.objects.filter(workspace=workspace, user=user).exists():
+        return
+    raise PermissionDenied("You do not have permission to view this workspace.")
+
+def check_workspace_admin_permission(workspace: Workspace, user):
+    if not _is_auth(user):
+        raise PermissionDenied("Authentication required.")
+    if _is_workspace_owner(user, workspace):
+        return
+    if WorkspaceMembership.objects.filter(workspace=workspace, user=user, role='admin').exists():
+        return
+    raise PermissionDenied("You must be an admin or the workspace owner to perform this action.")
+
+def check_workspace_member_permission(workspace: Workspace, user):
+    if not _is_auth(user):
+        raise PermissionDenied("Authentication required.")
+    if _is_workspace_owner(user, workspace):
+        return
+    if WorkspaceMembership.objects.filter(workspace=workspace, user=user).exists():
+        return
+    raise PermissionDenied("You do not have permission to perform this action on this workspace.")
+
+
+# ==================================
+# Card-level permission (kéo/thả, sửa…)
+# ==================================
 
 def check_card_edit_permission(card, user):
     """
-    KIỂM TRA QUYỀN SỬA CARD (Editor/Member trở lên).
-    User có thể sửa card (kéo thả, đổi tên, etc.) nếu họ là owner, admin, hoặc editor.
+    Cho phép sửa card nếu:
+    - Card trong inbox (list is None):
+        + là creator, hoặc
+        + user và creator có >=1 board chung
+    - Card thuộc một list (tức thuộc một board):
+        + user có quyền edit board đó (owner/ws-admin/board-admin/editor)
     """
-    # Xử lý cho card trong Inbox
-    if not card.list:
-        card_creator = card.created_by
-        if card_creator == user:
+    if not _is_auth(user):
+        raise PermissionDenied("Authentication required.")
+
+    # Card trong Inbox (không thuộc list)
+    if not getattr(card, "list_id", None):
+        if card.created_by_id == user.id:
             return
-        # Kiểm tra xem người dùng hiện tại và người tạo card có chung ít nhất một board không
-        user_boards = set(Board.objects.filter(Q(created_by=user) | Q(members=user)).values_list('id', flat=True))
-        creator_boards = set(Board.objects.filter(Q(created_by=card_creator) | Q(members=card_creator)).values_list('id', flat=True))
-        if user_boards.intersection(creator_boards):
+        # có board chung?
+        user_boards = Board.objects.filter(
+            Q(created_by=user) | Q(memberships__user=user)
+        ).values_list("id", flat=True)
+        creator_boards = Board.objects.filter(
+            Q(created_by=card.created_by) | Q(memberships__user=card.created_by)
+        ).values_list("id", flat=True)
+
+        if set(user_boards).intersection(set(creator_boards)):
             return
+
         raise PermissionDenied("You don't have permission to modify this inbox card.")
+
+    # Card thuộc list/board cụ thể
+    board = card.list.board
+    if can_edit_board(user, board):
+        return
     
-    # Xử lý cho card nằm trong một list
-    role = get_user_role_on_board(card.list.board, user)
-    if role in ['owner', 'admin', 'editor']:
-        return
+    owner = board.get_owner()
+    if owner and owner.id == user.id:
+        return True
+
     raise PermissionDenied("You must be an editor, admin, or owner to modify cards on this board.")
-
-def check_board_edit_permission(board, user):
+#=============Notification=================
+class IsRecipient(BasePermission):
     """
-    KIỂM TRA QUYỀN SỬA BOARD (Editor/Member trở lên).
-    User có thể sửa các thành phần của board (tạo list/card) nếu là owner, admin, hoặc editor.
+    Chỉ cho phép người nhận xem/sửa/xoá thông báo của chính họ.
     """
-    role = get_user_role_on_board(board, user)
-    if role in ['owner', 'admin', 'editor']:
-        return
-    raise PermissionDenied("You must be an editor, admin, or owner to modify this board.")
-
-
-def check_board_admin_permission(board, user):
+    def has_object_permission(self, request, view, obj):
+        return obj.recipient_id == request.user.id
+    
+def user_can_edit_board(user, board):
     """
-    KIỂM TRA QUYỀN QUẢN TRỊ BOARD (Admin trở lên).
-    Dùng cho các hành động nguy hiểm: mời thành viên, xóa cột, đóng board...
-    User có quyền nếu họ là owner hoặc admin.
+    Wrapper dùng trong view/serializer – dùng đúng logic can_edit_board.
     """
-    role = get_user_role_on_board(board, user)
-    if role in ['owner', 'admin']:
-        return
-    raise PermissionDenied("You must be an admin or the board creator to perform this action.")
+    return can_edit_board(user, board)

@@ -9,12 +9,19 @@ https://docs.djangoproject.com/en/5.2/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
+from dotenv import load_dotenv
 import os
 from pathlib import Path
 from datetime import timedelta
 
+
+from pathlib import Path
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(BASE_DIR / ".env")
+
 
 
 # Quick-start development settings - unsuitable for production
@@ -26,22 +33,18 @@ SECRET_KEY = 'django-insecure-ylp2b_80cd=8zgryq7n#cpcz&dn+u2g8s-hoe-r$=r9&jxgi&@
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = [
-    "tasknetbe-production.up.railway.app",  # domain BE Railway
-    "localhost",
-]
+ALLOWED_HOSTS = []
 CORS_ALLOWED_ORIGINS = [
-    "https://task-net-fe.vercel.app",  # domain FE Railway
-    "https://task-net-fe.vercel.app:3000",  # FE Railway with port
-    "https://task-net-fe.vercel.app:3001",  # FE Railway with port
-    "https://task-net-fe.vercel.app:3002",  # FE Railway with port
-    "https://task-net-fe.vercel.app:3003",  # FE Railway with port
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
   "http://localhost:3003",
 ]
 CORS_ALLOW_CREDENTIALS = True
+GOOGLE_OAUTH2_CLIENT_ID = "230570345332-if0223t4bdf57r4g01p0prc359pcd093.apps.googleusercontent.com"
+
+# Frontend URL for password reset links etc.
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 
 # Application definition
 
@@ -57,13 +60,14 @@ INSTALLED_APPS = [
     'rest_framework',
     'auth_app.apps.AuthAppConfig',
     'boards',
+    'channels',
     'rest_framework_simplejwt.token_blacklist',
     
     
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
+    'corsheaders.middleware.CorsMiddleware',    # đặt cao, trước CommonMiddleware
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -162,23 +166,27 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-ASGI_APPLICATION = 'config.socket.asgi.application'
-
+ASGI_APPLICATION = 'config.asgi.application'
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/1")  # dùng 127.0.0.1 để tránh '::1'
 CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            'hosts': [('127.0.0.1', 6379)],
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [REDIS_URL],
         },
-    },
+    }
 }
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
-STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_URL = '/static/'
 # Đường dẫn thư mục tuyệt đối trên server để lưu các file được tải lên
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
-# Nếu endpoint đăng nhập dùng Session/CSRF (không chỉ JWT), cần thêm:
-CSRF_TRUSTED_ORIGINS = [
-    "https://task-net-fe.vercel.app",
-]
+
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'TaskNest <noreply@example.com>')
+

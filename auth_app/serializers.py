@@ -1,69 +1,211 @@
-
 from rest_framework import serializers
-from django.contrib.auth import get_user_model, authenticate
+from django.contrib.auth import get_user_model, authenticate, password_validation
+from django.core.exceptions import ValidationError as DjangoValidationError
+from .models import Profile,AuthToken
 
 User = get_user_model()
 
-# ----------------- 1. Serializer để HIỂN THỊ thông tin User -----------------
-# Dùng cho MeView hoặc khi trả về thông tin user ở các API khác.
-class UserSerializer(serializers.ModelSerializer):
+# Lightweight serializer cho avatar display trong cards/members
+class UserAvatarSerializer(serializers.ModelSerializer):
     """
-    Serializer để hiển thị thông tin người dùng một cách an toàn.
+    Lightweight serializer cho avatar display.
+    Dùng trong: card members, board members, search results.
     """
-    # SerializerMethodField cho phép ta định nghĩa logic tùy chỉnh để lấy giá trị.
-    avatar = serializers.SerializerMethodField(read_only=True)
-    role = serializers.SerializerMethodField(read_only=True)
-
-    # ✅ THÊM MỘT TRƯỜNG MỚI ĐỂ LÀM TÊN HIỂN THỊ
-    display_name = serializers.SerializerMethodField(read_only=True)
+    id = serializers.IntegerField(source='user.id', read_only=True)
+    email = serializers.EmailField(source='user.email', read_only=True)
+    display_name = serializers.SerializerMethodField()
+    initials = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
+    avatar_thumbnail_url = serializers.SerializerMethodField()
+    
     class Meta:
-        model = User
-        # Các trường sẽ được trả về trong API response.
-        fields = ('id', 'username', 'email', 'avatar', 'role','display_name')
-
-    def get_avatar(self, user):
-        """
-        Lấy URL đầy đủ của avatar.
-        Cần có 'request' trong context để xây dựng URL tuyệt đối.
-        """
+        model = Profile
+        fields = ['id', 'email', 'display_name', 'initials', 'avatar_url', 'avatar_thumbnail_url']
+    
+    def get_display_name(self, profile):
+        return profile.get_display_name()
+    
+    def get_initials(self, profile):
+        return profile.get_initials()
+    
+    def get_avatar_url(self, profile):
         request = self.context.get('request')
-        profile = getattr(user, 'profile', None)
-        if profile and profile.avatar and request:
+        if profile.avatar and request:
             return request.build_absolute_uri(profile.avatar.url)
         return None
+    
+    def get_avatar_thumbnail_url(self, profile):
+        request = self.context.get('request')
+        if profile.avatar_thumbnail and request:
+            return request.build_absolute_uri(profile.avatar_thumbnail.url)
+        return None
+
+
+class ProfileSerializer(serializers.ModelSerializer):
+    """
+    Full profile serializer cho settings page.
+    Support: avatar/banner upload, privacy settings, profile info.
+    """
+    # Read-only computed fields
+    avatar_url = serializers.SerializerMethodField()
+    banner_url = serializers.SerializerMethodField() 
+    display_name_computed = serializers.SerializerMethodField()
+    initials = serializers.SerializerMethodField()
+    
+    # Write-only upload fields
+    avatar = serializers.ImageField(write_only=True, required=False)
+    banner = serializers.ImageField(write_only=True, required=False)
+    
+    class Meta:
+        model = Profile
+        fields = [
+            'display_name', 'bio', 'is_discoverable', 'show_boards_on_profile',
+            'avatar', 'banner', 'avatar_url', 'banner_url', 
+            'display_name_computed', 'initials'
+        ]
+    
+    def validate_avatar(self, value):
+        """
+        Validate avatar upload:
+        - Max size: 5MB
+        - Allowed types: JPEG, PNG, GIF, WebP
+        - Min dimensions: 40x40 (để tạo thumbnail)
+        """
+        if value:
+            # Check file size (5MB limit)
+            max_size = 5 * 1024 * 1024  # 5MB
+            if value.size > max_size:
+                raise serializers.ValidationError(
+                    f"Avatar file too large. Maximum size is 5MB. Your file is {value.size / 1024 / 1024:.1f}MB."
+                )
+            
+            # Check file type
+            allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+            if value.content_type not in allowed_types:
+                raise serializers.ValidationError(
+                    f"Invalid file type. Allowed types: JPEG, PNG, GIF, WebP."
+                )
+            
+            # Check image dimensions (optional - ensure it's a valid image)
+            try:
+                from PIL import Image
+                image = Image.open(value)
+                width, height = image.size
+                
+                if width < 40 or height < 40:
+                    raise serializers.ValidationError(
+                        "Image too small. Minimum size is 40x40 pixels."
+                    )
+                
+                # Reset file pointer after reading
+                value.seek(0)
+            except Exception as e:
+                raise serializers.ValidationError(f"Invalid image file: {str(e)}")
+        
+        return value
+    
+    def validate_banner(self, value):
+        """
+        Validate banner upload:
+        - Max size: 10MB (banner có thể lớn hơn avatar)
+        - Allowed types: JPEG, PNG, GIF, WebP
+        """
+        if value:
+            # Check file size (10MB limit)
+            max_size = 10 * 1024 * 1024  # 10MB
+            if value.size > max_size:
+                raise serializers.ValidationError(
+                    f"Banner file too large. Maximum size is 10MB. Your file is {value.size / 1024 / 1024:.1f}MB."
+                )
+            
+            # Check file type
+            allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+            if value.content_type not in allowed_types:
+                raise serializers.ValidationError(
+                    f"Invalid file type. Allowed types: JPEG, PNG, GIF, WebP."
+                )
+        
+        return value
+    
+    def validate_display_name(self, value):
+        """Validate display name length and characters"""
+        if value:
+            cleaned = value.strip()
+            if len(cleaned) > 50:
+                raise serializers.ValidationError("Display name too long (max 50 characters).")
+        return value
+    
+    def validate_bio(self, value):
+        """Validate bio length"""
+        if value and len(value) > 500:
+            raise serializers.ValidationError("Bio too long (max 500 characters).")
+        return value
+    
+    def validate(self, data):
+        """
+        Custom validation to handle data type conversions.
+        Frontend có thể gửi string thay vì boolean qua FormData.
+        """
+        # Ensure boolean fields are properly typed
+        boolean_fields = ['is_discoverable', 'show_boards_on_profile']
+        for field in boolean_fields:
+            if field in data:
+                value = data[field]
+                if isinstance(value, str):
+                    # Convert string to boolean
+                    data[field] = value.lower() in ('true', '1', 'yes', 'on')
+                elif value is None:
+                    data[field] = False
+        
+        return data
+    
+    def get_avatar_url(self, profile):
+        request = self.context.get('request')
+        if profile.avatar and request:
+            return request.build_absolute_uri(profile.avatar.url)
+        return None
+        
+    def get_banner_url(self, profile):
+        request = self.context.get('request')
+        if profile.banner and request:
+            return request.build_absolute_uri(profile.banner.url)
+        return None
+    
+    def get_display_name_computed(self, profile):
+        return profile.get_display_name()
+    
+    def get_initials(self, profile):
+        return profile.get_initials()
+
+
+class UserSerializer(serializers.ModelSerializer):
+    """
+    Enhanced user serializer với profile info.
+    Dùng trong: /auth/me/, login/register responses.
+    """
+    profile = ProfileSerializer(read_only=True)
+    role = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ('id', 'username', 'email', 'profile', 'role')
 
     def get_role(self, user):
-        """
-        Xác định vai trò của người dùng.
-        """
+        """Xác định vai trò: admin hoặc user"""
         return "admin" if user.is_superuser else "user"
-    
-    def get_display_name(self, user):
-        """
-        Trả về phần tên người dùng từ email.
-        Ví dụ: 'john.doe@example.com' -> 'john.doe'
-        Hoặc nếu có first_name, last_name thì trả về chúng.
-        """
-        # Nếu bạn có trường first_name và last_name, ưu tiên chúng
-        if user.first_name:
-            return user.first_name
-            
-        # Nếu không, trích xuất từ email
-        return user.email.split('@')[0]
 
 
-# ----------------- 2. Serializer cho chức năng ĐĂNG KÝ -----------------
 class RegisterSerializer(serializers.ModelSerializer):
     """
-    Serializer để xử lý việc đăng ký của người dùng mới.
-    Validate dữ liệu và tạo user.
+    Serializer cho user registration.
+    Validate email uniqueness và password strength.
     """
     password = serializers.CharField(
-        write_only=True,  # Chỉ dùng để ghi, không hiển thị trong response
+        write_only=True,
         required=True,
         min_length=8,
         error_messages={
-            "min_length": "Mật khẩu phải có ít nhất 8 ký tự."
+            "min_length": "Password must be at least 8 characters."
         }
     )
 
@@ -73,72 +215,151 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def validate_email(self, value):
         """
-        Kiểm tra xem email đã tồn tại hay chưa.
+        Check email uniqueness.
+        Note: Đây là potential security issue (user enumeration).
+        Consider generic message trong production.
         """
         if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("Email này đã được đăng ký.")
+            raise serializers.ValidationError("This email is already registered.")
         return value
 
     def create(self, validated_data):
         """
-        Tạo user mới với mật khẩu đã được hash.
+        Tạo user mới với hashed password.
+        Signal sẽ tự động tạo Profile.
         """
         user = User.objects.create_user(
-            username=validated_data['email'], # Dùng email làm username mặc định
+            username=validated_data['email'],  # Use email as username
             email=validated_data['email'],
             password=validated_data['password']
         )
-        # Signal 'post_save' sẽ tự động tạo Profile và Workspace cho user này.
         return user
 
 
-# ----------------- 3. Serializer cho chức năng ĐĂNG NHẬP -----------------
 class LoginSerializer(serializers.Serializer):
     """
-    Serializer để xử lý việc đăng nhập.
-    Không kế thừa từ ModelSerializer vì nó không tạo hay cập nhật model.
+    Serializer cho login.
+    Support cả email và username login.
     """
     email = serializers.CharField(label="Email/Username", write_only=True)
     password = serializers.CharField(write_only=True)
 
     def validate(self, data):
+        """
+        Authenticate user với email hoặc username.
+        """
         email_or_username = data.get('email')
         password = data.get('password')
 
         if not email_or_username or not password:
             raise serializers.ValidationError(
-                "Phải cung cấp cả email/username và mật khẩu.",
+                "Both email/username and password are required.",
                 code='authorization'
             )
 
-        # Thử tìm user bằng email trước
+        # Try to find user by email first
         try:
             user_obj = User.objects.get(email=email_or_username)
             username = user_obj.username
         except User.DoesNotExist:
-            # Nếu không thấy, coi như người dùng đã nhập username
+            # If not found, assume it's a username
             username = email_or_username
 
         user = authenticate(username=username, password=password)
 
         if not user:
             raise serializers.ValidationError(
-                "Email hoặc mật khẩu không đúng.",
+                "Invalid email/username or password.",
                 code='authorization'
             )
 
-        # Nếu xác thực thành công, trả về đối tượng user
         data['user'] = user
         return data
 
 
-# ----------------- 4. Serializer cho chức năng ĐĂNG NHẬP GOOGLE -----------------
 class GoogleLoginSerializer(serializers.Serializer):
-    """
-    Serializer để validate token từ Google.
-    """
+    """Serializer để validate Google OAuth token"""
     token = serializers.CharField(write_only=True, required=True)
 
-# ----------------- 5. Serializer cho chức năng INVITE -----------------
 
+class PasswordResetSerializer(serializers.Serializer):
+    email = serializers.EmailField()
 
+    def validate_email(self, value):
+        # Note: Always return success to prevent user enumeration
+        # Actual email existence check should happen in the view
+        return value
+class SetNewPasswordSerializer(serializers.Serializer):
+    token = serializers.UUIDField()
+    new_password = serializers.CharField(min_length=8, write_only=True)
+
+    def validate(self, data):
+        try:
+            auth_token = AuthToken.objects.get(token=data["token"], purpose="reset")
+        except AuthToken.DoesNotExist:
+            raise serializers.ValidationError("Invalid or expired token.")
+
+        if not auth_token.is_valid():
+            raise serializers.ValidationError("This token has expired.")
+
+        data["user"] = auth_token.user
+        return data
+
+    def save(self):
+        user = self.validated_data["user"]
+        password = self.validated_data["new_password"]
+        user.set_password(password)
+        user.save()
+        # invalidate token
+        AuthToken.objects.filter(user=user, purpose="reset").delete()
+        return user    
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+
+        if user is None or not user.is_authenticated:
+            raise serializers.ValidationError("Authentication required.")
+
+        old_password = attrs.get("old_password")
+        new_password = attrs.get("new_password")
+        confirm_password = attrs.get("confirm_password")
+
+        # Check old password
+        if not user.check_password(old_password):
+            raise serializers.ValidationError({"old_password": "Current password is incorrect."})
+
+        # New vs confirm
+        if new_password != confirm_password:
+            raise serializers.ValidationError({"confirm_password": "Passwords do not match."})
+
+        # Không cho phép dùng lại mật khẩu cũ
+        if old_password == new_password:
+            raise serializers.ValidationError({"new_password": "New password must be different from the old password."})
+
+        # Dùng password validators của Django
+        try:
+            password_validation.validate_password(new_password, user=user)
+        except DjangoValidationError as e:
+            # e.messages là list message
+            raise serializers.ValidationError({"new_password": list(e.messages)})
+
+        return attrs
+
+    def save(self, **kwargs):
+        request = self.context.get("request")
+        user = request.user
+        new_password = self.validated_data["new_password"]
+
+        user.set_password(new_password)
+        user.save()
+
+        # Optionally: xoá các token reset cũ (nếu muốn "sạch sẽ")
+        # AuthToken.objects.filter(user=user, purpose="reset").delete()
+
+        return user
